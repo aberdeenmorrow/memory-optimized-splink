@@ -30,16 +30,12 @@ from splink.internals.misc import ascii_uid, ensure_is_list
 from splink.internals.parse_sql import get_columns_used_from_sql
 from splink.internals.pipeline import CTEPipeline
 from splink.internals.predict import predict_from_comparison_vectors_sqls_using_settings
-from splink.internals.shard_sql import shard_comparison_vectors_sql
 from splink.internals.splink_dataframe import SplinkDataFrame
 from splink.internals.term_frequencies import (
     _join_new_table_to_df_concat_with_tf_sql,
     colname_to_tf_tablename,
 )
-from splink.internals.unique_id_concat import (
-    _composite_unique_id_from_edges_sql,
-    _composite_unique_id_from_nodes_sql,
-)
+from splink.internals.unique_id_concat import _composite_unique_id_from_edges_sql
 from splink.internals.vertically_concatenate import (
     compute_df_concat_with_tf,
     enqueue_df_concat_with_tf,
@@ -338,6 +334,12 @@ class LinkerInference:
         tf_array_columns_items = list(self._linker._settings_obj._tf_array_columns.items())
         tf_array_columns_items.sort(key=lambda x: (x[0] != "city_state_pairs", x[0]))
 
+        logger.info(f"Copying __splink__df_comparison_vectors to __splink__df_comparison_vectors.parquet")
+        self._linker._db_api._execute_sql_against_backend(
+            f"COPY __splink__df_comparison_vectors TO '__splink__df_comparison_vectors.parquet' (FORMAT parquet, COMPRESSION snappy, ROW_GROUP_SIZE 1000000);"
+        )
+        logger.info(f"Copied __splink__df_comparison_vectors to __splink__df_comparison_vectors.parquet")
+
         for col_name, (
             _,
             gamma_column_name,
@@ -367,7 +369,7 @@ class LinkerInference:
             if exact:
                 exact_gamma_levels = tf_params.get("exact_gamma_levels", [])
                 # Build the SQL
-                exact_cte = f"""base AS (
+                exact_cte = f"""CREATE TABLE base AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
@@ -376,7 +378,14 @@ class LinkerInference:
                     FROM __splink__df_comparison_vectors
                     WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})
                 )
-                , {col_name}_flattened AS (
+                """
+                logger.info(f"Base CTE: {exact_cte}")
+                self._linker._db_api._execute_sql_against_backend(exact_cte)
+                exact_count = self._linker._db_api._execute_sql_against_backend(f"SELECT COUNT(*) FROM base")
+                logger.info(f"Base count: {exact_count}")
+
+                flattened_cte = f"""
+                CREATE TABLE {col_name}_flattened AS (
                     SELECT
                         f.unique_id_l,
                         f.unique_id_r,
@@ -387,18 +396,53 @@ class LinkerInference:
                     JOIN {tf_table_name} AS tf ON tf.{term_column_name} = t1.term
                     WHERE t1.term = ANY(f.terms_r)  -- Move this condition here
                 )
+                """
+                logger.info(f"Flattened CTE: {flattened_cte}")
+                self._linker._db_api._execute_sql_against_backend(flattened_cte)
+                flattened_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM {col_name}_flattened"
+                )
+                logger.info(f"Flattened count: {flattened_count}")
+
+                logger.info(f"Dropping base table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE base")
+                logger.info(f"Dropped base table")
+
+                grouped_cte = f"""
+CREATE TABLE small_groups_{col_name} AS (
+  SELECT unique_id_l, unique_id_r, array_agg(tf_value) AS tf_unsorted
+  FROM {col_name}_flattened
+  GROUP BY unique_id_l, unique_id_r
+)
+                """
+                logger.info(f"Grouped CTE: {grouped_cte}")
+                self._linker._db_api._execute_sql_against_backend(grouped_cte)
+                grouped_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM small_groups_{col_name}"
+                )
+                logger.info(f"Grouped count: {grouped_count}")
+                self._linker._db_api._execute_sql_against_backend(
+                    f"COPY small_groups_{col_name} TO 'small_groups_{col_name}.parquet' (FORMAT parquet, COMPRESSION snappy, ROW_GROUP_SIZE 1000000);"
+                )
+                logger.info(f"Copied small_groups_{col_name} table to parquet")
+
+                select_cte = f"""
                 SELECT
                     unique_id_l,
                     unique_id_r,
-                    array_agg(tf_value ORDER BY tf_value) AS tf_values
-                FROM {col_name}_flattened
-                GROUP BY unique_id_l, unique_id_r
-                HAVING array_length(array_agg(tf_value)) <= 10  -- Limit to max 10 terms for performance
+                    array_sort(tf_unsorted) AS tf_values
+                FROM small_groups_{col_name}
                 """
-
-                self._linker._db_api._execute_sql_against_backend(
-                    f"CREATE TABLE {col_name}_values AS WITH {exact_cte}"
+                sql = f"CREATE TABLE {col_name}_values AS {select_cte}"
+                logger.info(f"{col_name}_values SQL: {sql}")
+                self._linker._db_api._execute_sql_against_backend(sql)
+                select_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM {col_name}_values"
                 )
+                logger.info(f"Select count: {select_count}")
+                logger.info(f"Dropping flattened table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_flattened")
+                logger.info(f"Dropped flattened table")
 
                 # Simplified TF calculation - avoid complex subqueries
                 ln_base = math.log(log_base)
@@ -427,16 +471,8 @@ class LinkerInference:
                 FROM {col_name}_values
                 """
 
-                sql = f"""{exact_table_construction_sql}"""
-
-                sql = shard_comparison_vectors_sql(
-                    core_sql=sql,
-                    num_shards=5,  # Reduced from 10 for better performance
-                    table_name=f"{blocked_with_tf_table_name}{'_exact' if fuzzy else ''}",
-                    input_table_name=f"{col_name}_values",
-                    logger=logger,
-                )
-                logger.info(f"optimized, sharded sql: {sql}")
+                sql = f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_exact' if fuzzy else ''}"} AS {exact_table_construction_sql}"""
+                logger.info(f"optimized sql: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
 
                 preview = self._linker._db_api._execute_sql_against_backend(
@@ -514,16 +550,10 @@ SELECT
     END AS tf_adjustment_{col_name}
 FROM fuzzy_tf_values;
                 """
-                sql = shard_comparison_vectors_sql(
-                    core_sql=sql,
-                    table_name=f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}",
-                    input_table_name="__splink__df_comparison_vectors",
-                    pre_shard_cte=f"{filtered_cte} {fuzzy_ctes} ",
-                    num_shards=5,  # Reduced from 10 for better performance
-                    logger=logger,
+                sql = (
+                    f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}"} AS {sql}"""
                 )
-
-                logger.info(f"Optimized, sharded SQL:\n{sql}")
+                logger.info(f"Optimized SQL:\n{sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
 
                 preview = self._linker._db_api._execute_sql_against_backend(
@@ -554,14 +584,7 @@ FROM fuzzy_tf_values;
         )
         # __splink__df_match_weight_parts
         try:
-            # sql = f"CREATE TABLE {sqls[0]['output_table_name']} AS {sqls[0]['sql']}"
-            sql = shard_comparison_vectors_sql(
-                core_sql=sqls[0]["sql"],
-                table_name=sqls[0]["output_table_name"],
-                input_table_name="__splink__df_comparison_vectors",
-                logger=logger,
-                num_shards=30,  # Reduced from 100 for better performance
-            )
+            sql = f"CREATE TABLE {sqls[0]['output_table_name']} AS {sqls[0]['sql']}"
             logger.info(f"Optimized Predict SQL: {sql}")
             self._linker._db_api._execute_sql_against_backend(sql)
         except Exception as e:

@@ -1,13 +1,13 @@
+import logging
 import multiprocessing
 import textwrap
-import logging
 
 
 def shard_comparison_vectors_sql(
     core_sql: str,
     table_name: str,
     input_table_name: str,
-    logger: logging.Logger,
+    logger: logging.Logger | None = None,
     pre_shard_cte: str | None = None,
     num_shards: int = multiprocessing.cpu_count(),
 ) -> str:
@@ -25,7 +25,8 @@ def shard_comparison_vectors_sql(
     if pre_shard_cte:
         pre_shard_cte = pre_shard_cte.replace(input_table_name, "sharded")
 
-    logger.info(f"Indented SQL:\n{indented}")
+    if logger:
+        logger.info(f"Indented SQL:\n{indented}")
 
     # Build header: PRAGMA + CREATE WITH CTE
     lines = [

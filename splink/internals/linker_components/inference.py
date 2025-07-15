@@ -368,16 +368,20 @@ class LinkerInference:
 
             if exact:
                 exact_gamma_levels = tf_params.get("exact_gamma_levels", [])
+                gamma_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM __splink__df_comparison_vectors WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})"
+                )
+                logger.info(f"Gamma count for {col_name}: {gamma_count}")
                 # Build the SQL
                 exact_cte = f"""CREATE TABLE base AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
-                        {col.name_l} AS terms_l,
-                        {col.name_r} AS terms_r
+                        array_intersect({col.name_l}, {col.name_r}) AS common_terms
                     FROM __splink__df_comparison_vectors
                     WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})
                 )
+<<<<<<< HEAD
                 """
                 logger.info(f"Base CTE: {exact_cte}")
                 self._linker._db_api._execute_sql_against_backend(exact_cte)
@@ -386,15 +390,18 @@ class LinkerInference:
 
                 flattened_cte = f"""
                 CREATE TABLE {col_name}_flattened AS (
+=======
+
+                , {col_name}_flattened AS (
+>>>>>>> 7a8ef5e94db457701b647241febef9137279d7fa
                     SELECT
                         f.unique_id_l,
                         f.unique_id_r,
-                        t1.term,
+                        z.term,
                         tf.{tf_column_name} AS tf_value
                     FROM base AS f
-                    CROSS JOIN UNNEST(f.terms_l) AS t1(term)
-                    JOIN {tf_table_name} AS tf ON tf.{term_column_name} = t1.term
-                    WHERE t1.term = ANY(f.terms_r)  -- Move this condition here
+                    CROSS JOIN UNNEST(f.common_terms) AS z(term)
+                    JOIN {tf_table_name} AS tf ON tf.{term_column_name} = z.term
                 )
                 """
                 logger.info(f"Flattened CTE: {flattened_cte}")
@@ -433,6 +440,7 @@ CREATE TABLE small_groups_{col_name} AS (
                     array_sort(tf_unsorted) AS tf_values
                 FROM small_groups_{col_name}
                 """
+<<<<<<< HEAD
                 sql = f"CREATE TABLE {col_name}_values AS {select_cte}"
                 logger.info(f"{col_name}_values SQL: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
@@ -443,6 +451,12 @@ CREATE TABLE small_groups_{col_name} AS (
                 logger.info(f"Dropping flattened table")
                 self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_flattened")
                 logger.info(f"Dropped flattened table")
+=======
+
+                sql = f"CREATE TABLE {col_name}_values AS WITH {exact_cte}"
+                logger.info(f"Exact CTE SQL: {sql}")
+                self._linker._db_api._execute_sql_against_backend(sql)
+>>>>>>> 7a8ef5e94db457701b647241febef9137279d7fa
 
                 # Simplified TF calculation - avoid complex subqueries
                 ln_base = math.log(log_base)
@@ -474,6 +488,7 @@ CREATE TABLE small_groups_{col_name} AS (
                 sql = f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_exact' if fuzzy else ''}"} AS {exact_table_construction_sql}"""
                 logger.info(f"optimized sql: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_values")
 
                 preview = self._linker._db_api._execute_sql_against_backend(
                     f"SELECT * FROM {blocked_with_tf_table_name}{'_exact' if fuzzy else ''} LIMIT 20"

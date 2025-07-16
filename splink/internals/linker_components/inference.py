@@ -278,8 +278,6 @@ class LinkerInference:
         )
         logger.info(f"{sqls[0]['output_table_name']} size: {table_size}")
 
-        drop_blocked_pairs_tables(self._linker._db_api)
-
         blocked_count = table_size.fetchone()[0]
         if blocked_count == 0:
             raise SplinkException(
@@ -334,12 +332,6 @@ class LinkerInference:
         # Sort so 'city_state_pairs' goes first every time
         tf_array_columns_items = list(self._linker._settings_obj._tf_array_columns.items())
         tf_array_columns_items.sort(key=lambda x: (x[0] != "city_state_pairs", x[0]))
-
-        logger.info(f"Copying __splink__df_comparison_vectors to __splink__df_comparison_vectors.parquet")
-        self._linker._db_api._execute_sql_against_backend(
-            f"COPY __splink__df_comparison_vectors TO '__splink__df_comparison_vectors.parquet' (FORMAT parquet, COMPRESSION snappy, ROW_GROUP_SIZE 1000000);"
-        )
-        logger.info(f"Copied __splink__df_comparison_vectors to __splink__df_comparison_vectors.parquet")
 
         for col_name, (
             _,
@@ -456,13 +448,13 @@ CREATE TABLE small_groups_{col_name} AS (
                         WHEN array_length(tf_values) = 1 THEN
                             ({N} / tf_values[1])
                         WHEN array_length(tf_values) = 2 THEN
-                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base})
+                            ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base})
                         WHEN array_length(tf_values) = 3 THEN
-                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base})
+                            ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base})
                         WHEN array_length(tf_values) = 4 THEN
-                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + ({math.log(4/3)} / tf_values[4]) * {N / ln_base})
+                            ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base})
                         WHEN array_length(tf_values) = 5 THEN
-                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + ({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + ({math.log(5/4)} / tf_values[5]) * {N / ln_base})
+                            ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + (({math.log(5/4)} / tf_values[5]) * {N / ln_base})
                         ELSE
                             -- For more than 5 terms, use a simplified calculation
                             ({N} / tf_values[1]) + 
@@ -525,17 +517,17 @@ SELECT
     unique_id_l,
     unique_id_r,
     CASE
-        WHEN array_length(tf_values) = 1 THEN
-            ({N} / tf_values[1])
-        WHEN array_length(tf_values) = 2 THEN
-            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base})
-        WHEN array_length(tf_values) = 3 THEN
-            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base})
-        WHEN array_length(tf_values) = 4 THEN
-            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base}) + ((LN(4.0/3.0) / tf_values[4]) * {N / ln_base})
-        WHEN array_length(tf_values) = 5 THEN
-            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base}) + ((LN(4.0/3.0) / tf_values[4]) * {N / ln_base}) + ((LN(5.0/4.0) / tf_values[5]) * {N / ln_base})
-        ELSE
+    WHEN array_length(tf_values) = 1 THEN
+        ({N} / tf_values[1])
+    WHEN array_length(tf_values) = 2 THEN
+        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base})
+    WHEN array_length(tf_values) = 3 THEN
+        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base})
+    WHEN array_length(tf_values) = 4 THEN
+        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base})
+    WHEN array_length(tf_values) = 5 THEN
+        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + (({math.log(5/4)} / tf_values[5]) * {N / ln_base})
+    ELSE
             -- For more than 5 terms, use a simplified calculation
             ({N} / tf_values[1]) + 
             (SELECT SUM((LN((row_number + 1.0)/row_number) / value) * {N / ln_base})

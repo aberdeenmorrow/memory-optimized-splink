@@ -81,7 +81,7 @@ def predict_from_comparison_vectors_sqls(
 
     sql = f"""
     select {select_cols_expr} {clerical_match_score}
-    from sharded AS cv
+    from __splink__df_comparison_vectors AS cv
         {tf_joins}
     """
     sql_info = {

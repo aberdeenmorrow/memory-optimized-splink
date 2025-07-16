@@ -774,6 +774,11 @@ def block_using_rules_sqls(
     return sqls
 
 
+def drop_blocked_pairs_tables(db_api: DatabaseAPISubClass):
+    sql = "DROP TABLE IF EXISTS __splink__blocked_id_pairs"
+    db_api._execute_sql_against_backend(sql)
+
+
 def block_using_rules_sql_optimized(
     *,
     input_tablename_l: str,

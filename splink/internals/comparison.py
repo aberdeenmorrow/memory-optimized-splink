@@ -271,8 +271,13 @@ class Comparison:
                         continue
                     output_cols.extend(f"cv.{c}" for c in col.tf_name_l_r)
 
-        # tf adjustment case when statement
+        # Bayes factor case when statement
+        sqls = [cl._bayes_factor_sql(f"cv.{self._gamma_column_name}") for cl in self.comparison_levels]
+        sql = " ".join(sqls)
+        sql = f"CASE {sql} END as {self._bf_column_name} "
+        output_cols.append(sql)
 
+        # tf adjustment case when statement
         if self._has_tf_adjustments:
             sqls = [
                 cl._tf_adjustment_sql(self._gamma_column_name, self.comparison_levels)
@@ -280,12 +285,6 @@ class Comparison:
             ]
             sql = " ".join(sqls)
             sql = f"CASE {sql} END as {self._bf_tf_adj_column_name} "
-            output_cols.append(sql)
-        else:
-            # Bayes factor case when statement
-            sqls = [cl._bayes_factor_sql(f"cv.{self._gamma_column_name}") for cl in self.comparison_levels]
-            sql = " ".join(sqls)
-            sql = f"CASE {sql} END as {self._bf_column_name} "
             output_cols.append(sql)
 
         output_cols.append(self._gamma_column_name)
@@ -425,11 +424,9 @@ class Comparison:
 
     @property
     def _match_weight_columns_to_multiply(self):
-        cols = []
+        cols = [self._bf_column_name]
         if self._has_tf_adjustments:
             cols.append(self._bf_tf_adj_column_name)
-        else:
-            cols.append(self._bf_column_name)
         return cols
 
     def as_dict(self):

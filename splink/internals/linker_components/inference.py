@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import multiprocessing
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -279,12 +278,14 @@ class LinkerInference:
         )
         logger.info(f"{sqls[0]['output_table_name']} size: {table_size}")
 
+        drop_blocked_pairs_tables(self._linker._db_api)
+
         blocked_count = table_size.fetchone()[0]
         if blocked_count == 0:
             raise SplinkException(
                 "Blocking rules resulted in no blocked id pairs. Exiting early. Please loosen blocking rules or input more data."
             )
-        logger.info(f"Processing {blocked_count} blocked pairs")
+        logger.info(f"Processing {blocked_count:,} blocked pairs")
 
         # pipeline.enqueue_list_of_sqls(sqls)
 
@@ -381,7 +382,6 @@ class LinkerInference:
                     FROM __splink__df_comparison_vectors
                     WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})
                 )
-<<<<<<< HEAD
                 """
                 logger.info(f"Base CTE: {exact_cte}")
                 self._linker._db_api._execute_sql_against_backend(exact_cte)
@@ -390,10 +390,6 @@ class LinkerInference:
 
                 flattened_cte = f"""
                 CREATE TABLE {col_name}_flattened AS (
-=======
-
-                , {col_name}_flattened AS (
->>>>>>> 7a8ef5e94db457701b647241febef9137279d7fa
                     SELECT
                         f.unique_id_l,
                         f.unique_id_r,
@@ -440,7 +436,6 @@ CREATE TABLE small_groups_{col_name} AS (
                     array_sort(tf_unsorted) AS tf_values
                 FROM small_groups_{col_name}
                 """
-<<<<<<< HEAD
                 sql = f"CREATE TABLE {col_name}_values AS {select_cte}"
                 logger.info(f"{col_name}_values SQL: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
@@ -451,12 +446,6 @@ CREATE TABLE small_groups_{col_name} AS (
                 logger.info(f"Dropping flattened table")
                 self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_flattened")
                 logger.info(f"Dropped flattened table")
-=======
-
-                sql = f"CREATE TABLE {col_name}_values AS WITH {exact_cte}"
-                logger.info(f"Exact CTE SQL: {sql}")
-                self._linker._db_api._execute_sql_against_backend(sql)
->>>>>>> 7a8ef5e94db457701b647241febef9137279d7fa
 
                 # Simplified TF calculation - avoid complex subqueries
                 ln_base = math.log(log_base)
@@ -467,13 +456,13 @@ CREATE TABLE small_groups_{col_name} AS (
                         WHEN array_length(tf_values) = 1 THEN
                             ({N} / tf_values[1])
                         WHEN array_length(tf_values) = 2 THEN
-                            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base})
+                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base})
                         WHEN array_length(tf_values) = 3 THEN
-                            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base})
+                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base})
                         WHEN array_length(tf_values) = 4 THEN
-                            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base}) + ((LN(4.0/3.0) / tf_values[4]) * {N / ln_base})
+                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + ({math.log(4/3)} / tf_values[4]) * {N / ln_base})
                         WHEN array_length(tf_values) = 5 THEN
-                            ({N} / tf_values[1]) + ((LN(2.0/1.0) / tf_values[2]) * {N / ln_base}) + ((LN(3.0/2.0) / tf_values[3]) * {N / ln_base}) + ((LN(4.0/3.0) / tf_values[4]) * {N / ln_base}) + ((LN(5.0/4.0) / tf_values[5]) * {N / ln_base})
+                            ({N} / tf_values[1]) + ({math.log(2)} / tf_values[2]) * {N / ln_base}) + ({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + ({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + ({math.log(5/4)} / tf_values[5]) * {N / ln_base})
                         ELSE
                             -- For more than 5 terms, use a simplified calculation
                             ({N} / tf_values[1]) + 
@@ -497,27 +486,19 @@ CREATE TABLE small_groups_{col_name} AS (
             if fuzzy:
                 fuzzy_gamma_levels = tf_params.get("fuzzy_gamma_levels", [])
                 # Build the SQL - optimized fuzzy matching
-                filtered_cte = f"""filtered AS (
+                ln_base = math.log(log_base)
+                fuzzy_cte = f"""filtered AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
-                        shard,
                         {col.name_l} AS terms_l,
                         {col.name_r} AS terms_r
                     FROM __splink__df_comparison_vectors
                     WHERE {gamma_column_name} IN ({', '.join(str(l) for l in fuzzy_gamma_levels)})
-                )
-                """
-
-                # Optimized fuzzy matching - avoid double CROSS JOIN
-                ln_base = math.log(log_base)
-
-                fuzzy_ctes = f"""
-                , fuzzy_pairs AS (
+                ), fuzzy_pairs AS (
                     SELECT
                         f.unique_id_l,
                         f.unique_id_r,
-                        f.shard,
                         t1.term1,
                         t2.term2,
                         GREATEST(tf1.{tf_column_name}, tf2.{tf_column_name}) AS tf_value
@@ -532,10 +513,9 @@ CREATE TABLE small_groups_{col_name} AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
-                        shard,
                         array_agg(tf_value ORDER BY tf_value) AS tf_values
                     FROM fuzzy_pairs
-                    GROUP BY unique_id_l, unique_id_r, shard
+                    GROUP BY unique_id_l, unique_id_r
                 )
                 """
 
@@ -565,9 +545,7 @@ SELECT
     END AS tf_adjustment_{col_name}
 FROM fuzzy_tf_values;
                 """
-                sql = (
-                    f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}"} AS {sql}"""
-                )
+                sql = f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}"} AS WITH {fuzzy_cte} {sql}"""
                 logger.info(f"Optimized SQL:\n{sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
 

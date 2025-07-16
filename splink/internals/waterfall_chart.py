@@ -4,6 +4,8 @@ import math
 from copy import deepcopy
 from typing import Any, Dict
 
+import tqdm
+
 from splink.internals.comparison import Comparison
 from splink.internals.misc import prob_to_bayes_factor
 
@@ -54,9 +56,7 @@ def _comparison_records(
     cl = c._get_comparison_level_by_comparison_vector_value(cv_value)
     waterfall_record = {
         field: value
-        for field, value in cl._as_detailed_record(
-            c._num_levels, c.comparison_levels
-        ).items()
+        for field, value in cl._as_detailed_record(c._num_levels, c.comparison_levels).items()
         if field
         in [
             "label_for_charts",
@@ -79,12 +79,8 @@ def _comparison_records(
         waterfall_record["value_l"] = ""
         waterfall_record["value_r"] = ""
     else:
-        waterfall_record["value_l"] = ", ".join(
-            [str(record_as_dict[n]) for n in input_cols_l]
-        )
-        waterfall_record["value_r"] = ", ".join(
-            [str(record_as_dict[n]) for n in input_cols_r]
-        )
+        waterfall_record["value_l"] = ", ".join([str(record_as_dict[n]) for n in input_cols_l])
+        waterfall_record["value_r"] = ", ".join([str(record_as_dict[n]) for n in input_cols_r])
 
     waterfall_record["term_frequency_adjustment"] = False
 
@@ -154,7 +150,7 @@ def record_to_waterfall_data(record_as_dict, settings_obj, hide_details):
 
 def records_to_waterfall_data(records, settings_obj, hide_details):
     waterfall_data = []
-    for i, record in enumerate(records):
+    for i, record in tqdm.tqdm(enumerate(records)):
         new_data = record_to_waterfall_data(record, settings_obj, hide_details)
         for rec in new_data:
             rec["record_number"] = i

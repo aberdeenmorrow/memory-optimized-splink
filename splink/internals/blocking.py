@@ -15,7 +15,6 @@ from splink.internals.dialects import SplinkDialect
 from splink.internals.exceptions import SplinkException
 from splink.internals.input_column import InputColumn
 from splink.internals.misc import ensure_is_list
-from splink.internals.parse_sql import get_columns_used_from_sql
 from splink.internals.pipeline import CTEPipeline
 from splink.internals.splink_dataframe import SplinkDataFrame
 from splink.internals.unique_id_concat import (
@@ -90,6 +89,7 @@ class BlockingRule:
             raise ValueError(f"Blocking rule must be a string, not {type(blocking_rule_sql)}")
         self.blocking_rule_sql = blocking_rule_sql
         self.preceding_rules: List[BlockingRule] = []
+        self.blocked_id_pairs_table: Optional[SplinkDataFrame] = None
 
     @property
     def sqlglot_dialect(self):
@@ -114,6 +114,18 @@ class BlockingRule:
         """A SQL string specifying how to exclude the results
         of THIS blocking rule from subseqent blocking statements,
         so that subsequent statements do not produce duplicate pairs
+        """
+        if (splink_df := self.blocked_id_pairs_table) is None:
+            raise SplinkException(
+                "Must use `materialise_exploded_id_table(linker)` "
+                "to set `exploded_id_pair_table` before calling "
+                "exclude_pairs_generated_by_this_rule_sql()."
+            )
+
+        ids_to_compare_sql = f"select * from {splink_df.physical_name}"
+
+        return f"""
+        {ids_to_compare_sql}
         """
 
         # Note the coalesce function is important here - otherwise
@@ -193,40 +205,43 @@ class BlockingRule:
         input_tablename_r: str,
         where_condition: str,
     ) -> str:
-        if source_dataset_input_column:
-            unique_id_columns = [source_dataset_input_column, unique_id_input_column]
-        else:
-            unique_id_columns = [unique_id_input_column]
+        return f"""
+            select join_key_l, join_key_r, match_key from {self.blocked_id_pairs_table.physical_name}
+        """
 
-        uid_l_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "l")
-        uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
+    # if source_dataset_input_column:
+    #     unique_id_columns = [source_dataset_input_column, unique_id_input_column]
+    # else:
+    #     unique_id_columns = [unique_id_input_column]
 
-        sql = f"""
-            select
-            '{self.match_key}' as match_key,
-            {uid_l_expr} as join_key_l,
-            {uid_r_expr} as join_key_r
-            from {input_tablename_l} as l
-            inner join {input_tablename_r} as r
-            on
-            ({self.blocking_rule_sql})
-            {where_condition}
-            {self.exclude_pairs_generated_by_all_preceding_rules_sql(
-                source_dataset_input_column,
-                unique_id_input_column)
-            }
-            """
-        return sql
+    # uid_l_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "l")
+    # uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
+
+    # sql = f"""
+    #     select
+    #     '{self.match_key}' as match_key,
+    #     {uid_l_expr} as {unique_id_input_column.name_l},
+    #     {uid_r_expr} as {unique_id_input_column.name_r}
+    #     from {input_tablename_l} as l
+    #     inner join {input_tablename_r} as r
+    #     on
+    #     ({self.blocking_rule_sql})
+    #     {where_condition}
+    #     """
+    # # {self.exclude_pairs_generated_by_all_preceding_rules_sql(
+    # #     source_dataset_input_column,
+    # #     unique_id_input_column)
+    # # }
+    # return sql
 
     def create_blocked_pairs_sql_optimized(
         self,
         *,
-        source_dataset_input_column: Optional[InputColumn],
+        source_dataset_input_column: Optional[InputColumn] | None = None,
         unique_id_input_column: InputColumn,
         input_tablename_l: str,
         input_tablename_r: str,
-        where_condition: str,
-        cols_to_select: str | None = None,
+        link_type: "LinkTypeLiteralType",
     ) -> str:
         if source_dataset_input_column:
             unique_id_columns = [source_dataset_input_column, unique_id_input_column]
@@ -235,20 +250,20 @@ class BlockingRule:
 
         uid_l_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "l")
         uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
+
+        where_condition = _sql_gen_where_condition(link_type, [unique_id_input_column])
+        if link_type == "two_dataset_link_only":
+            where_condition = where_condition + " and l.source_dataset < r.source_dataset"
+
         sql = f"""
             select
             '{self.match_key}' as match_key,
             {uid_l_expr} as join_key_l,
-            {uid_r_expr} as join_key_r
+            {uid_r_expr} as join_key_r,
             from {input_tablename_l} as l
             join {input_tablename_r} as r
-            on
-            ({self.blocking_rule_sql})
+            on ({self.blocking_rule_sql})
             {where_condition}
-            {self.exclude_pairs_generated_by_all_preceding_rules_sql(
-                source_dataset_input_column,
-                unique_id_input_column)
-            }
             """
         return sql
 
@@ -335,6 +350,11 @@ class BlockingRule:
     def _human_readable_succinct(self):
         sql = self._abbreviated_sql(75)
         return f"{self.descr} blocking rule using SQL: {sql}"
+
+    def drop_materialised_id_pairs_dataframe(self):
+        if self.blocked_id_pairs_table is not None:
+            self.blocked_id_pairs_table.drop_table_from_database_and_remove_from_cache()
+        self.blocked_id_pairs_table = None
 
 
 class SaltedBlockingRule(BlockingRule):
@@ -431,11 +451,7 @@ class ExplodingBlockingRule(BlockingRule):
         i.e. pairs are only created that match this blocking rule and NOT any of
         the preceding blocking rules
         """
-        unique_id_col = unique_id_input_column
-        unique_id_input_columns = combine_unique_id_input_columns(
-            source_dataset_input_column, unique_id_input_column
-        )
-
+        unique_id_input_columns = [unique_id_input_column]
         id_expr_l = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "l")
         id_expr_r = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "r")
 
@@ -446,20 +462,19 @@ class ExplodingBlockingRule(BlockingRule):
                 pipline_has_preceding_tables,  # TODO: @aberdeenmorrow clean up this code
             )
         )
+        exclude_sql_1 = None
 
         where_condition = _sql_gen_where_condition(link_type, unique_id_input_columns, exclude_sql_1)
         if link_type == "two_dataset_link_only":
             where_condition = where_condition + " and l.source_dataset < r.source_dataset"
-
         sql = f"""
-            {exclude_sql_1}
             select
-                {id_expr_l} as {unique_id_col.name_l},
-                {id_expr_r} as {unique_id_col.name_r}
+            {br.match_key} as match_key,
+            {id_expr_l} as join_key_l,
+            {id_expr_r} as join_key_r,
             from {unnested_table_name} as l
             join {unnested_table_name} as r
             on ({br.blocking_rule_sql})
-            {exclude_sql_2}
             {where_condition};
             """
 
@@ -496,12 +511,12 @@ class ExplodingBlockingRule(BlockingRule):
 
         ids_to_compare_sql = f"select * from {splink_df.physical_name}"
 
-        id_expr_l = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "l")
-        id_expr_r = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "r")
-
         return f"""
         {ids_to_compare_sql}
         """
+
+        id_expr_l = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "l")
+        id_expr_r = _composite_unique_id_from_nodes_sql(unique_id_input_columns, "r")
 
         return f"""EXISTS (
             select 1 from ({ids_to_compare_sql}) as ids_to_compare
@@ -528,11 +543,7 @@ class ExplodingBlockingRule(BlockingRule):
 
         exploded_id_pair_table = self.exploded_id_pair_table
         sql = f"""
-            select
-                '{self.match_key}' as match_key,
-                {unique_id_input_column.name_l} as join_key_l,
-                {unique_id_input_column.name_r} as join_key_r
-            from {exploded_id_pair_table.physical_name}
+            select join_key_l, join_key_r, match_key from {exploded_id_pair_table.physical_name}
         """
         return sql
 
@@ -586,11 +597,12 @@ def materialise_exploded_id_tables(
     source_dataset_input_column: Optional[InputColumn],
     unique_id_input_column: InputColumn,
     drop_exploded_tables: bool = False,
+    df_tf_table_name: Optional[str] = None,
 ) -> list[ExplodingBlockingRule]:
     exploding_blocking_rules = [br for br in blocking_rules if isinstance(br, ExplodingBlockingRule)]
 
-    if len(exploding_blocking_rules) == 0:
-        return []
+    # if len(exploding_blocking_rules) == 0:
+    #     return []
     exploded_tables: list[SplinkDataFrame] = []
     unnested_tables: list[SplinkDataFrame] = []
 
@@ -609,65 +621,95 @@ def materialise_exploded_id_tables(
     input_colnames = {col.name for col in nodes_concat.columns}
     exploded_id_pair_table_cache: dict[str, SplinkDataFrame] = {}
 
-    for br in tqdm(exploding_blocking_rules, desc="Exploding arrays"):
-        logger.info(f"Exploding arrays for {br.exploded_id_pair_table}")
-        if br.exploded_id_pair_table is not None:
-            exploded_id_pair_table_cache[br.exploded_id_pair_table.physical_name] = br.exploded_id_pair_table
-            logger.info(
-                f"Using existing exploded id pair table for {br.exploded_id_pair_table.physical_name}"
-            )
-            continue
-        unnested_table_name = f"__splink__df_concat_unnested_{'_'.join(sorted(br.array_columns_to_explode))}"
-        arrays_to_explode_quoted = [
-            InputColumn(colname, sqlglot_dialect_str=db_api.sql_dialect.sqlglot_dialect).quote().name
-            for colname in br.array_columns_to_explode
-        ]
-
-        unnested_table = _check_table_in_db(unnested_table_name, db_api)
-        logger.info(f"Unnested table {unnested_table_name} exists: {unnested_table is not None}")
-
-        if unnested_table is None:
-            # TODO: This can grab only the set of columns required by blocking rules that use this exploded table.
-            # Don't need to carry around the entire table
-            logger.info(f"Exploding arrays for {unnested_table_name}")
-            pipeline = CTEPipeline([nodes_concat])
-            expl_sql = db_api.sql_dialect.explode_arrays_sql(
-                "__splink__df_concat",
-                br.array_columns_to_explode,
-                list(input_colnames.difference(arrays_to_explode_quoted)),
-            )
-
-            pipeline.enqueue_sql(
-                expl_sql,
-                unnested_table_name,
-            )
-
-            unnested_table = db_api.sql_pipeline_to_splink_dataframe(pipeline)
-            exploded_id_pair_table_cache[unnested_table_name] = unnested_table
+    for i, br in tqdm(enumerate(blocking_rules), desc="Exploding arrays"):
+        if df_tf_table_name:
+            pipeline = CTEPipeline()
+            pipeline.enqueue_sql(f"select * from {df_tf_table_name}", "__splink__df_concat_with_tf")
         else:
-            logger.info(f"Using existing unnested table {unnested_table_name}")
+            pipeline = CTEPipeline([nodes_concat])
+        if isinstance(br, ExplodingBlockingRule):
+            logger.info(f"Exploding arrays for {br.exploded_id_pair_table}")
+            if br.exploded_id_pair_table is not None:
+                exploded_id_pair_table_cache[br.exploded_id_pair_table.physical_name] = (
+                    br.exploded_id_pair_table
+                )
+                logger.info(
+                    f"Using existing exploded id pair table for {br.exploded_id_pair_table.physical_name}"
+                )
+                continue
+            unnested_table_name = (
+                f"__splink__df_concat_unnested_{'_'.join(sorted(br.array_columns_to_explode))}"
+            )
+            arrays_to_explode_quoted = [
+                InputColumn(colname, sqlglot_dialect_str=db_api.sql_dialect.sqlglot_dialect).quote().name
+                for colname in br.array_columns_to_explode
+            ]
 
-        if unnested_table not in unnested_tables:
-            unnested_tables.append(unnested_table)
-        pipeline = CTEPipeline([unnested_table])
-        base_name = "__splink__marginal_exploded_ids_blocking_rule"
-        table_name = f"{base_name}_mk_{br.match_key}"
+            unnested_table = _check_table_in_db(unnested_table_name, db_api)
+            logger.info(f"Unnested table {unnested_table_name} exists: {unnested_table is not None}")
 
-        logger.info(f"Generating marginal exploded id pairs table sql for {table_name}")
-        sql = br.marginal_exploded_id_pairs_table_sql(
-            source_dataset_input_column=source_dataset_input_column,
-            unique_id_input_column=unique_id_input_column,
-            br=br,
-            link_type=link_type,
-            unnested_table_name=unnested_table_name,
-            pipline_has_preceding_tables=True,
-        )
+            if unnested_table is None:
+                # TODO: This can grab only the set of columns required by blocking rules that use this exploded table.
+                # Don't need to carry around the entire table
+                logger.info(f"Exploding arrays for {unnested_table_name}")
+                cols_to_select = list(input_colnames.difference(arrays_to_explode_quoted))
+                cols_to_select.append("tf_first_last")
 
-        pipeline.enqueue_sql(sql, table_name)
+                expl_sql = db_api.sql_dialect.explode_arrays_sql(
+                    df_tf_table_name or "__splink__df_concat",
+                    br.array_columns_to_explode,
+                    cols_to_select,
+                )
 
-        marginal_ids_table = db_api.sql_pipeline_to_splink_dataframe(pipeline)
-        br.exploded_id_pair_table = marginal_ids_table
-        exploded_tables.append(marginal_ids_table)
+                pipeline.enqueue_sql(
+                    expl_sql,
+                    unnested_table_name,
+                )
+
+                unnested_table = db_api.sql_pipeline_to_splink_dataframe(pipeline)
+                exploded_id_pair_table_cache[unnested_table_name] = unnested_table
+            else:
+                logger.info(f"Using existing unnested table {unnested_table_name}")
+
+            if unnested_table not in unnested_tables:
+                unnested_tables.append(unnested_table)
+            pipeline = CTEPipeline([unnested_table])
+
+            # For all brs, generate the marginal exploded id pairs table
+            base_name = "__splink__marginal_exploded_ids_blocking_rule"
+            table_name = f"{base_name}_mk_{br.match_key}"
+
+            logger.info(f"Generating marginal exploded id pairs table sql for {table_name}")
+            sql = br.marginal_exploded_id_pairs_table_sql(
+                source_dataset_input_column=source_dataset_input_column,
+                unique_id_input_column=unique_id_input_column,
+                br=br,
+                link_type=link_type,
+                unnested_table_name=unnested_table_name,
+                pipline_has_preceding_tables=True,
+            )
+
+            pipeline.enqueue_sql(sql, table_name)
+
+            marginal_ids_table = db_api.sql_pipeline_to_splink_dataframe(pipeline)
+            br.exploded_id_pair_table = marginal_ids_table
+            exploded_tables.append(marginal_ids_table)
+        else:
+            # For all brs, generate the marginal exploded id pairs table
+            base_name = "__splink__marginal_exploded_ids_blocking_rule"
+            table_name = f"{base_name}_mk_{br.match_key}"
+
+            logger.info(f"Generating marginal exploded id pairs table sql for {table_name}")
+            sql = br.create_blocked_pairs_sql_optimized(
+                input_tablename_l="__splink__df_concat_with_tf",
+                input_tablename_r="__splink__df_concat_with_tf",
+                unique_id_input_column=unique_id_input_column,
+                link_type=link_type,
+            )
+
+            pipeline.enqueue_sql(sql, table_name)
+
+            br.blocked_id_pairs_table = db_api.sql_pipeline_to_splink_dataframe(pipeline)
 
     logger.info("Dropping exploded tables from database after materializing blocked pairs:")
     unique_unnested_table_names = list(set([table.physical_name for table in unnested_tables]))
@@ -767,7 +809,12 @@ def block_using_rules_sqls(
         )
         br_sqls.append(sql)
 
-    sql = " UNION ALL ".join(br_sqls)
+    sql = (
+        "SELECT DISTINCT join_key_l, join_key_r, min(match_key) as match_key FROM ( "
+        + " UNION ALL ".join(br_sqls)
+        + " )"
+        + " GROUP BY join_key_l, join_key_r"
+    )
 
     sqls.append({"sql": sql, "output_table_name": "__splink__blocked_id_pairs"})
 
@@ -815,11 +862,9 @@ def block_using_rules_sql_optimized(
     for br in blocking_rules:
         sql = br.create_blocked_pairs_sql_optimized(
             unique_id_input_column=unique_id_input_column,
-            source_dataset_input_column=source_dataset_input_column,
             input_tablename_l=input_tablename_l,
+            link_type=link_type,
             input_tablename_r=input_tablename_r,
-            where_condition=where_condition,
-            cols_to_select=cols_to_select,
         )
         br_sqls.append(sql)
 

@@ -669,14 +669,10 @@ class ComparisonLevel:
             elif tf_col_is_array:
                 # For array TF columns, return the calculated TF adjustment from inference
                 tf_adjustment_column = f"{col_name}_tf.tf_adjustment_{col_name}"
-                tf_adjustment_exists = f"{tf_adjustment_column} is not null"
 
                 sql = f"""
                 WHEN cv.{gamma_colname_value_is_this_level} THEN
-                    CASE WHEN {tf_adjustment_exists}
-                    THEN {tf_adjustment_column}
-                    ELSE cast(1 as float8)
-                    END
+                    COALESCE({tf_adjustment_column}, 1.0)
                 """
 
             elif self._is_exact_match:
@@ -713,7 +709,7 @@ class ComparisonLevel:
                 WHEN  {gamma_colname_value_is_this_level} then
                     (CASE WHEN {tf_adjustment_exists}
                     THEN {multiplier_sql}
-                    ELSE cast(1 as float8)
+                    ELSE 1.0
                     END)
                 """
 
@@ -739,7 +735,7 @@ class ComparisonLevel:
                 WHEN  {gamma_colname_value_is_this_level} then
                     (CASE WHEN {tf_adjustment_exists}
                     THEN {multiplier_sql}
-                    ELSE cast(1 as float8)
+                    ELSE 1.0
                     END)
                 """
         return dedent(sql).strip()

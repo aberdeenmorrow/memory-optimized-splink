@@ -192,6 +192,7 @@ class BlockingRule:
         input_tablename_l: str,
         input_tablename_r: str,
         where_condition: str,
+        include_match_key: bool = False,
     ) -> str:
         if source_dataset_input_column:
             unique_id_columns = [source_dataset_input_column, unique_id_input_column]
@@ -202,8 +203,7 @@ class BlockingRule:
         uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
 
         sql = f"""
-            select
-            '{self.match_key}' as match_key,
+            select {f"'{self.match_key}' as match_key," if include_match_key else ""}
             {uid_l_expr} as join_key_l,
             {uid_r_expr} as join_key_r
             from {input_tablename_l} as l
@@ -227,6 +227,7 @@ class BlockingRule:
         input_tablename_r: str,
         where_condition: str,
         cols_to_select: str | None = None,
+        include_matchkey_column: bool = False,
     ) -> str:
         if source_dataset_input_column:
             unique_id_columns = [source_dataset_input_column, unique_id_input_column]
@@ -235,9 +236,13 @@ class BlockingRule:
 
         uid_l_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "l")
         uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
+        if include_matchkey_column:
+            match_key_sql = f"'{self.match_key}' as match_key,"
+        else:
+            match_key_sql = ""
         sql = f"""
             select
-            '{self.match_key}' as match_key,
+            {match_key_sql}
             {uid_l_expr} as join_key_l,
             {uid_r_expr} as join_key_r
             from {input_tablename_l} as l
@@ -520,6 +525,7 @@ class ExplodingBlockingRule(BlockingRule):
         input_tablename_l: str,
         input_tablename_r: str,
         where_condition: str,
+        include_matchkey_column: bool = False,
     ) -> str:
         if self.exploded_id_pair_table is None:
             raise ValueError(
@@ -529,7 +535,7 @@ class ExplodingBlockingRule(BlockingRule):
         exploded_id_pair_table = self.exploded_id_pair_table
         sql = f"""
             select
-                '{self.match_key}' as match_key,
+                {f"'{self.match_key}' as match_key," if include_matchkey_column else ""}
                 {unique_id_input_column.name_l} as join_key_l,
                 {unique_id_input_column.name_r} as join_key_r
             from {exploded_id_pair_table.physical_name}
@@ -609,32 +615,39 @@ def materialise_exploded_id_tables(
     input_colnames = {col.name for col in nodes_concat.columns}
     exploded_id_pair_table_cache: dict[str, SplinkDataFrame] = {}
 
+    cols_per_exploded_table = {}
+    for br in exploding_blocking_rules:
+        unnested_table_name = f"__splink__df_concat_unnested_{'_'.join(sorted(br.array_columns_to_explode))}"
+        if unnested_table_name not in cols_per_exploded_table:
+            cols_per_exploded_table[unnested_table_name] = set()
+        cols_used = get_columns_used_from_sql(br.blocking_rule_sql)
+        arrays_to_explode_quoted = [
+            InputColumn(colname, sqlglot_dialect_str=db_api.sql_dialect.sqlglot_dialect).name
+            for colname in cols_used
+        ]
+        cols_per_exploded_table[unnested_table_name].update(arrays_to_explode_quoted)
+
     for br in tqdm(exploding_blocking_rules, desc="Exploding arrays"):
         logger.info(f"Exploding arrays for {br.exploded_id_pair_table}")
         if br.exploded_id_pair_table is not None:
             exploded_id_pair_table_cache[br.exploded_id_pair_table.physical_name] = br.exploded_id_pair_table
-            logger.info(
-                f"Using existing exploded id pair table for {br.exploded_id_pair_table.physical_name}"
-            )
             continue
         unnested_table_name = f"__splink__df_concat_unnested_{'_'.join(sorted(br.array_columns_to_explode))}"
-        arrays_to_explode_quoted = [
-            InputColumn(colname, sqlglot_dialect_str=db_api.sql_dialect.sqlglot_dialect).quote().name
-            for colname in br.array_columns_to_explode
-        ]
-
         unnested_table = _check_table_in_db(unnested_table_name, db_api)
         logger.info(f"Unnested table {unnested_table_name} exists: {unnested_table is not None}")
 
         if unnested_table is None:
             # TODO: This can grab only the set of columns required by blocking rules that use this exploded table.
             # Don't need to carry around the entire table
-            logger.info(f"Exploding arrays for {unnested_table_name}")
+            logger.info(
+                f"Exploding arrays for {unnested_table_name} with cols {cols_per_exploded_table[unnested_table_name]}"
+            )
             pipeline = CTEPipeline([nodes_concat])
             expl_sql = db_api.sql_dialect.explode_arrays_sql(
                 "__splink__df_concat",
                 br.array_columns_to_explode,
-                list(input_colnames.difference(arrays_to_explode_quoted)),
+                list(cols_per_exploded_table[unnested_table_name].difference(br.array_columns_to_explode))
+                + ["source_dataset", "unique_id"],
             )
 
             pipeline.enqueue_sql(
@@ -700,8 +713,6 @@ def _sql_gen_where_condition(
         if join_key_col_name
         else _composite_unique_id_from_nodes_sql(unique_id_cols, "r")
     )
-
-    logger.info(f"gen where cond link_type = {link_type}")
 
     if link_type in ("two_dataset_link_only", "self_link"):
         where_condition = " where 1=1 "

@@ -13,6 +13,7 @@ from splink.internals.blocking import (
 )
 from splink.internals.blocking_rule_creator import BlockingRuleCreator
 from splink.internals.blocking_rule_creator_utils import to_blocking_rule_creator
+from splink.internals.comparison_level import ComparisonLevel, total_records_in_field
 from splink.internals.comparison_vector_values import (
     compute_blocked_candidates_from_id_pairs_sql,
     compute_comparison_metrics_from_blocked_candidates_sql,
@@ -278,14 +279,38 @@ class LinkerInference:
         )
         logger.info(f"{sqls[0]['output_table_name']} size: {table_size}")
 
+        # deduplicate blocked id pairs
+        logger.info("Deduplicating blocked id pairs")
+        if self._linker._settings_obj._needs_matchkey_column:
+            match_key_sql = ", MIN(match_key) as match_key"
+        else:
+            match_key_sql = ""
+        self._linker._db_api._execute_sql_against_backend(
+            f"""
+            CREATE TABLE __splink__blocked_id_pairs_deduped AS SELECT join_key_l, join_key_r{match_key_sql} FROM __splink__blocked_id_pairs GROUP BY join_key_l, join_key_r;
+            DROP TABLE __splink__blocked_id_pairs;
+            ALTER TABLE __splink__blocked_id_pairs_deduped RENAME TO __splink__blocked_id_pairs
+            """
+        )
+        self._linker._db_api._execute_sql_against_backend(
+            f"COPY (SELECT * FROM __splink__blocked_id_pairs) TO '__splink__blocked_id_pairs.parquet'"
+        )
+
+        # drop tables per blocking rule
+        logger.info("Dropping exploded id tables")
+        for br in exploding_br_with_id_tables:
+            br.drop_materialised_id_pairs_dataframe()
+
+        # print tables in db
+        tables_result = self._linker._db_api._execute_sql_against_backend("SHOW TABLES")
+        logger.info(f"Tables in db: {tables_result.fetchall()}")
+
         blocked_count = table_size.fetchone()[0]
         if blocked_count == 0:
             raise SplinkException(
                 "Blocking rules resulted in no blocked id pairs. Exiting early. Please loosen blocking rules or input more data."
             )
         logger.info(f"Processing {blocked_count:,} blocked pairs")
-
-        # pipeline.enqueue_list_of_sqls(sqls)
 
         if materialise_blocked_pairs:
             blocked_pairs = self._linker._db_api.sql_pipeline_to_splink_dataframe(pipeline)
@@ -314,6 +339,10 @@ class LinkerInference:
         )
         logger.info(f"{sqls[0]['output_table_name']} size: {table_size}")
 
+        logger.info("Dropping __splink__blocked_id_pairs table")
+        self._linker._db_api._execute_sql_against_backend(f"DROP TABLE __splink__blocked_id_pairs")
+        logger.info("Dropped __splink__blocked_id_pairs table")
+
         tables_result = self._linker._db_api._execute_sql_against_backend("SHOW TABLES")
         logger.info(f"Tables in db: {tables_result.fetchall()}")
 
@@ -326,12 +355,42 @@ class LinkerInference:
             f"SELECT COUNT(*) FROM {sqls[1]['output_table_name']}"
         )
         logger.info(f"{sqls[1]['output_table_name']} size: {table_size}")
+        save_table = self._linker._db_api._execute_sql_against_backend(
+            f"""
+            COPY (SELECT * FROM {sqls[1]['output_table_name']})
+            TO '{sqls[1]['output_table_name']}.parquet'
+            (FORMAT PARQUET,
+            COMPRESSION SNAPPY,
+            ROW_GROUP_SIZE 100000
+        )"""
+        )
+        logger.info(f"Saved table: {sqls[1]['output_table_name']}")
+        logger.info("Dropping blocked_with_cols table")
+        self._linker._db_api._execute_sql_against_backend(f"DROP TABLE blocked_with_cols")
+        logger.info("Dropped blocked_with_cols table")
 
         logger.info(f"TF array columns: {self._linker._settings_obj._tf_array_columns}")
 
+        tables_result = self._linker._db_api._execute_sql_against_backend("SHOW TABLES")
+        logger.info(f"Tables in db: {tables_result.fetchall()}")
+
+        # self._generate_scalar_tf_bfs()
+        # TODO: @aberdeenmorrow Figure out why there's skew here
+        # total_entries = self._linker._db_api._execute_sql_against_backend(
+        #     "SELECT COUNT(*) FROM __splink__df_comparison_vectors"
+        # )
+        # logger.info(f"Total entries in __splink__df_comparison_vectors: {total_entries}")
+
+        # distinct_pairs = self._linker._db_api._execute_sql_against_backend(
+        #     "SELECT COUNT(DISTINCT(unique_id_l, unique_id_r)) FROM __splink__df_comparison_vectors"
+        # )
+        # logger.info(
+        #     f"Distinct (unique_id_l, unique_id_r) pairs in __splink__df_comparison_vectors: {distinct_pairs}"
+        # )
+
         # Sort so 'city_state_pairs' goes first every time
         tf_array_columns_items = list(self._linker._settings_obj._tf_array_columns.items())
-        tf_array_columns_items.sort(key=lambda x: (x[0] != "city_state_pairs", x[0]))
+        tf_array_columns_items.sort(key=lambda x: (x[0] != "street_addresses", x[0]))
 
         for col_name, (
             _,
@@ -361,35 +420,69 @@ class LinkerInference:
 
             if exact:
                 exact_gamma_levels = tf_params.get("exact_gamma_levels", [])
+                select_gamma_sql = (
+                    f"IN ({', '.join(str(l) for l in exact_gamma_levels)})"
+                    if len(exact_gamma_levels) > 1
+                    else f" = {exact_gamma_levels[0]}"
+                )
                 gamma_count = self._linker._db_api._execute_sql_against_backend(
-                    f"SELECT COUNT(*) FROM __splink__df_comparison_vectors WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})"
+                    f"SELECT COUNT(*) FROM __splink__df_comparison_vectors WHERE {gamma_column_name} {select_gamma_sql}"
                 )
                 logger.info(f"Gamma count for {col_name}: {gamma_count}")
-                # Build the SQL
+
+                # Build the SQL to get the common terms
                 exact_cte = f"""CREATE TABLE base AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
                         array_intersect({col.name_l}, {col.name_r}) AS common_terms
                     FROM __splink__df_comparison_vectors
-                    WHERE {gamma_column_name} IN ({', '.join(str(l) for l in exact_gamma_levels)})
+                    WHERE {gamma_column_name} {select_gamma_sql}
                 )
                 """
                 logger.info(f"Base CTE: {exact_cte}")
                 self._linker._db_api._execute_sql_against_backend(exact_cte)
                 exact_count = self._linker._db_api._execute_sql_against_backend(f"SELECT COUNT(*) FROM base")
                 logger.info(f"Base count: {exact_count}")
+                base_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM base LIMIT 20"
+                )
+                logger.info(f"Base preview: {base_preview}")
 
+                # Flatten the common terms
                 flattened_cte = f"""
-                CREATE TABLE {col_name}_flattened AS (
+                CREATE OR REPLACE TABLE common_terms_flattened AS
                     SELECT
-                        f.unique_id_l,
-                        f.unique_id_r,
-                        z.term,
-                        tf.{tf_column_name} AS tf_value
-                    FROM base AS f
-                    CROSS JOIN UNNEST(f.common_terms) AS z(term)
-                    JOIN {tf_table_name} AS tf ON tf.{term_column_name} = z.term
+                        unique_id_l,
+                        unique_id_r,
+                        z.term
+                    FROM base
+                    CROSS JOIN UNNEST(array_distinct(common_terms)) AS z(term)
+                """
+                logger.info(f"Flattened CTE: {flattened_cte}")
+                self._linker._db_api._execute_sql_against_backend(flattened_cte)
+                flattened_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM common_terms_flattened"
+                )
+                logger.info(f"common_terms_flattened count: {flattened_count}")
+                flattened_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM common_terms_flattened LIMIT 20"
+                )
+                logger.info(f"common_terms_flattened preview: {flattened_preview}")
+
+                logger.info(f"Dropping base table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE base")
+                logger.info(f"Dropped base table")
+
+                # Assign tf values
+                flattened_cte = f"""
+                CREATE OR REPLACE TABLE {col_name}_flattened AS (
+                    SELECT
+                        unique_id_l,
+                        unique_id_r,
+                        tf.{tf_column_name} as tf_value
+                    FROM common_terms_flattened as ct
+                    JOIN {tf_table_name} as tf ON tf.{term_column_name} = ct.term
                 )
                 """
                 logger.info(f"Flattened CTE: {flattened_cte}")
@@ -397,12 +490,16 @@ class LinkerInference:
                 flattened_count = self._linker._db_api._execute_sql_against_backend(
                     f"SELECT COUNT(*) FROM {col_name}_flattened"
                 )
-                logger.info(f"Flattened count: {flattened_count}")
+                logger.info(f"{col_name}_flattened count: {flattened_count}")
+                flattened_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM {col_name}_flattened LIMIT 20"
+                )
+                logger.info(f"{col_name}_flattened preview: {flattened_preview}")
+                logger.info(f"Dropping common_terms_flattened table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE common_terms_flattened")
+                logger.info(f"Dropped common_terms_flattened table")
 
-                logger.info(f"Dropping base table")
-                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE base")
-                logger.info(f"Dropped base table")
-
+                # Group by unique_id_l and unique_id_r and sort the tf_values
                 grouped_cte = f"""
 CREATE TABLE small_groups_{col_name} AS (
   SELECT unique_id_l, unique_id_r, array_agg(tf_value) AS tf_unsorted
@@ -416,11 +513,15 @@ CREATE TABLE small_groups_{col_name} AS (
                     f"SELECT COUNT(*) FROM small_groups_{col_name}"
                 )
                 logger.info(f"Grouped count: {grouped_count}")
-                self._linker._db_api._execute_sql_against_backend(
-                    f"COPY small_groups_{col_name} TO 'small_groups_{col_name}.parquet' (FORMAT parquet, COMPRESSION snappy, ROW_GROUP_SIZE 1000000);"
+                grouped_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM small_groups_{col_name} LIMIT 20"
                 )
-                logger.info(f"Copied small_groups_{col_name} table to parquet")
+                logger.info(f"small_groups_{col_name} preview: {grouped_preview}")
+                logger.info(f"Dropping {col_name}_flattened table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_flattened")
+                logger.info(f"Dropped {col_name}_flattened table")
 
+                # Select the tf_values
                 select_cte = f"""
                 SELECT
                     unique_id_l,
@@ -431,13 +532,17 @@ CREATE TABLE small_groups_{col_name} AS (
                 sql = f"CREATE TABLE {col_name}_values AS {select_cte}"
                 logger.info(f"{col_name}_values SQL: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
-                select_count = self._linker._db_api._execute_sql_against_backend(
-                    f"SELECT COUNT(*) FROM {col_name}_values"
+                value_counts = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT array_length(tf_values) as len, COUNT(*) as count FROM {col_name}_values GROUP BY len ORDER BY len"
                 )
-                logger.info(f"Select count: {select_count}")
-                logger.info(f"Dropping flattened table")
-                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE {col_name}_flattened")
-                logger.info(f"Dropped flattened table")
+                logger.info(f"tf_values length value counts for {col_name}: {value_counts}")
+                value_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM {col_name}_values LIMIT 20"
+                )
+                logger.info(f"{col_name}_values preview: {value_preview}")
+                logger.info(f"Dropping small groups table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE small_groups_{col_name}")
+                logger.info(f"Dropped small groups table")
 
                 # Simplified TF calculation - avoid complex subqueries
                 ln_base = math.log(log_base)
@@ -479,29 +584,90 @@ CREATE TABLE small_groups_{col_name} AS (
                 fuzzy_gamma_levels = tf_params.get("fuzzy_gamma_levels", [])
                 # Build the SQL - optimized fuzzy matching
                 ln_base = math.log(log_base)
-                fuzzy_cte = f"""filtered AS (
+                select_gamma_sql = (
+                    f"IN ({', '.join(str(l) for l in fuzzy_gamma_levels)})"
+                    if len(fuzzy_gamma_levels) > 1
+                    else f" = {fuzzy_gamma_levels[0]}"
+                )
+
+                # filter down to relevalt pairs
+                filtered_cte = f"""
+                CREATE TABLE filtered_{col_name}_fuzzy AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
                         {col.name_l} AS terms_l,
                         {col.name_r} AS terms_r
                     FROM __splink__df_comparison_vectors
-                    WHERE {gamma_column_name} IN ({', '.join(str(l) for l in fuzzy_gamma_levels)})
-                ), fuzzy_pairs AS (
+                    WHERE {gamma_column_name} {select_gamma_sql}
+                    )
+                """
+                logger.info(f"Filtered CTE: {filtered_cte}")
+                self._linker._db_api._execute_sql_against_backend(filtered_cte)
+                filtered_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM filtered_{col_name}_fuzzy"
+                )
+                logger.info(f"Filtered count: {filtered_count}")
+                filtered_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM filtered_{col_name}_fuzzy LIMIT 20"
+                )
+                logger.info(f"Filtered preview: {filtered_preview}")
+
+                # build the fuzzy pairs table
+                fuzzy_pairs_l = f"""
+                CREATE TABLE exploded_terms_l AS (
+  SELECT unique_id_l, t.term AS term
+  FROM filtered_{col_name}_fuzzy
+  CROSS JOIN UNNEST(terms_l) AS t(term)
+);
+"""
+                logger.info(f"Exploded terms l: {fuzzy_pairs_l}")
+                self._linker._db_api._execute_sql_against_backend(fuzzy_pairs_l)
+
+                fuzzy_pairs_r = f"""
+CREATE TABLE exploded_terms_r AS (
+  SELECT unique_id_r, t.term AS term
+  FROM filtered_{col_name}_fuzzy
+  CROSS JOIN UNNEST(terms_r) AS t(term)
+);
+                """
+                logger.info(f"Exploded terms r: {fuzzy_pairs_r}")
+                self._linker._db_api._execute_sql_against_backend(fuzzy_pairs_r)
+
+                fuzzy_pairs_cte = f"""
+                CREATE TABLE fuzzy_pairs AS (
+                """
+                fuzzy_pairs_cte = f"""CREATE TABLE fuzzy_pairs AS (
                     SELECT
                         f.unique_id_l,
                         f.unique_id_r,
-                        t1.term1,
-                        t2.term2,
+                        l.term as term1,
+                        r.term as term2,
                         GREATEST(tf1.{tf_column_name}, tf2.{tf_column_name}) AS tf_value
-                    FROM filtered AS f
-                    CROSS JOIN UNNEST(f.terms_l) AS t1(term1)
-                    CROSS JOIN UNNEST(f.terms_r) AS t2(term2)
-                    LEFT JOIN {tf_table_name} AS tf1 ON tf1.{term_column_name} = t1.term1
-                    LEFT JOIN {tf_table_name} AS tf2 ON tf2.{term_column_name} = t2.term2
-                    WHERE jaro_winkler_similarity(t1.term1, t2.term2) >= 0.95
-                ),
-                fuzzy_tf_values AS (
+                    FROM filtered_{col_name}_fuzzy AS f
+                    JOIN exploded_terms_l l ON f.unique_id_l = l.unique_id_l
+  JOIN exploded_terms_r r ON f.unique_id_r = r.unique_id_r
+                    LEFT JOIN {tf_table_name} AS tf1 ON tf1.{term_column_name} = l.term
+                    LEFT JOIN {tf_table_name} AS tf2 ON tf2.{term_column_name} = r.term
+                    WHERE jaro_winkler_similarity(l.term, r.term) >= 0.95
+                )"""
+                logger.info(f"Fuzzy pairs CTE: {fuzzy_pairs_cte}")
+                self._linker._db_api._execute_sql_against_backend(fuzzy_pairs_cte)
+                fuzzy_pairs_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM fuzzy_pairs"
+                )
+                logger.info(f"Fuzzy pairs count: {fuzzy_pairs_count}")
+                fuzzy_pairs_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM fuzzy_pairs LIMIT 20"
+                )
+                logger.info(f"Fuzzy pairs preview: {fuzzy_pairs_preview}")
+                # drop the filtered table
+                logger.info(f"Dropping filtered_{col_name}_fuzzy table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE filtered_{col_name}_fuzzy")
+                logger.info(f"Dropped filtered_{col_name}_fuzzy table")
+
+                # build the fuzzy tf values table
+                fuzzy_tf_values_cte = f"""CREATE TABLE fuzzy_tf_values AS (
                     SELECT
                         unique_id_l,
                         unique_id_r,
@@ -510,41 +676,61 @@ CREATE TABLE small_groups_{col_name} AS (
                     GROUP BY unique_id_l, unique_id_r
                 )
                 """
+                logger.info(f"Fuzzy tf values CTE: {fuzzy_tf_values_cte}")
+                self._linker._db_api._execute_sql_against_backend(fuzzy_tf_values_cte)
+                fuzzy_tf_values_count = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT COUNT(*) FROM fuzzy_tf_values"
+                )
+                logger.info(f"Fuzzy tf values count: {fuzzy_tf_values_count}")
+                fuzzy_tf_values_preview = self._linker._db_api._execute_sql_against_backend(
+                    f"SELECT * FROM fuzzy_tf_values LIMIT 20"
+                )
+                logger.info(f"Fuzzy tf values preview: {fuzzy_tf_values_preview}")
+                # drop the fuzzy pairs table
+                logger.info(f"Dropping fuzzy_pairs table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE fuzzy_pairs")
+                logger.info(f"Dropped fuzzy_pairs table")
 
                 # Simplified TF calculation for fuzzy matches
                 sql = f"""
-SELECT
-    unique_id_l,
-    unique_id_r,
-    CASE
-    WHEN array_length(tf_values) = 1 THEN
-        ({N} / tf_values[1])
-    WHEN array_length(tf_values) = 2 THEN
-        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base})
-    WHEN array_length(tf_values) = 3 THEN
-        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base})
-    WHEN array_length(tf_values) = 4 THEN
-        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base})
-    WHEN array_length(tf_values) = 5 THEN
-        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + (({math.log(5/4)} / tf_values[5]) * {N / ln_base})
-    ELSE
-            -- For more than 5 terms, use a simplified calculation
-            ({N} / tf_values[1]) + 
-            (SELECT SUM((LN((row_number + 1.0)/row_number) / value) * {N / ln_base})
-             FROM (SELECT value, ROW_NUMBER() OVER (ORDER BY value) AS row_number
-                   FROM UNNEST(tf_values) AS t(value)) AS numbered_values
-             WHERE row_number > 1 AND row_number <= 5)
-    END AS tf_adjustment_{col_name}
-FROM fuzzy_tf_values;
+                SELECT
+                    unique_id_l,
+                    unique_id_r,
+                    CASE
+                    WHEN array_length(tf_values) = 1 THEN
+                        ({N} / tf_values[1])
+                    WHEN array_length(tf_values) = 2 THEN
+                        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base})
+                    WHEN array_length(tf_values) = 3 THEN
+                        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base})
+                    WHEN array_length(tf_values) = 4 THEN
+                        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base})
+                    WHEN array_length(tf_values) = 5 THEN
+                        ({N} / tf_values[1]) + (({math.log(2)} / tf_values[2]) * {N / ln_base}) + (({math.log(3/2)} / tf_values[3]) * {N / ln_base}) + (({math.log(4/3)} / tf_values[4]) * {N / ln_base}) + (({math.log(5/4)} / tf_values[5]) * {N / ln_base})
+                    ELSE
+                            -- For more than 5 terms, use a simplified calculation
+                            ({N} / tf_values[1]) + 
+                            (SELECT SUM((LN((row_number + 1.0)/row_number) / value) * {N / ln_base})
+                            FROM (SELECT value, ROW_NUMBER() OVER (ORDER BY value) AS row_number
+                                FROM UNNEST(tf_values) AS t(value)) AS numbered_values
+                            WHERE row_number > 1 AND row_number <= 5)
+                    END AS tf_adjustment_{col_name}
+                FROM fuzzy_tf_values;
                 """
-                sql = f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}"} AS WITH {fuzzy_cte} {sql}"""
-                logger.info(f"Optimized SQL:\n{sql}")
+                sql = (
+                    f"""CREATE TABLE {f"{blocked_with_tf_table_name}{'_fuzzy' if exact else ''}"} AS {sql}"""
+                )
+                logger.info(f"Fuzzy tf values SQL: {sql}")
                 self._linker._db_api._execute_sql_against_backend(sql)
 
                 preview = self._linker._db_api._execute_sql_against_backend(
                     f"SELECT * FROM {blocked_with_tf_table_name}{'_fuzzy' if exact else ''} LIMIT 20"
                 )
                 logger.info(f"Preview of {col_name} tf intersection table: {preview}")
+                # drop the fuzzy tf values table
+                logger.info(f"Dropping fuzzy_tf_values table")
+                self._linker._db_api._execute_sql_against_backend(f"DROP TABLE fuzzy_tf_values")
+                logger.info(f"Dropped fuzzy_tf_values table")
 
                 if exact:
                     merge_sql = f"""CREATE TABLE {blocked_with_tf_table_name} AS 
@@ -554,6 +740,18 @@ FROM fuzzy_tf_values;
                     logger.info("Merging fuzzy and exact tables into one bf_tf table")
                     logger.info(merge_sql)
                     self._linker._db_api._execute_sql_against_backend(merge_sql)
+                    # drop the fuzzy table
+                    logger.info(f"Dropping {blocked_with_tf_table_name}_fuzzy table")
+                    self._linker._db_api._execute_sql_against_backend(
+                        f"DROP TABLE {blocked_with_tf_table_name}_fuzzy"
+                    )
+                    logger.info(f"Dropped {blocked_with_tf_table_name}_fuzzy table")
+                    # drop the exact table
+                    logger.info(f"Dropping {blocked_with_tf_table_name}_exact table")
+                    self._linker._db_api._execute_sql_against_backend(
+                        f"DROP TABLE {blocked_with_tf_table_name}_exact"
+                    )
+                    logger.info(f"Dropped {blocked_with_tf_table_name}_exact table")
 
                 preview = self._linker._db_api._execute_sql_against_backend(
                     f"SELECT * FROM {blocked_with_tf_table_name} LIMIT 20"
@@ -567,6 +765,10 @@ FROM fuzzy_tf_values;
             threshold_match_weight,
             sql_infinity_expression=self._linker._infinity_expression,
         )
+
+        tables_result = self._linker._db_api._execute_sql_against_backend("SHOW TABLES")
+        logger.info(f"Tables in db: {tables_result.fetchall()}")
+
         # __splink__df_match_weight_parts
         try:
             sql = f"CREATE TABLE {sqls[0]['output_table_name']} AS {sqls[0]['sql']}"
@@ -1082,8 +1284,10 @@ FROM fuzzy_tf_values;
         cols_to_select = self._linker._settings_obj._columns_to_select_for_blocking
 
         select_expr = ", ".join(cols_to_select)
+        if linker._settings_obj._needs_matchkey_column:
+            select_expr += ", 0 as match_key"
         sql = f"""
-        select {select_expr}, 0 as match_key
+        select {select_expr}
         from __splink__compare_two_records_left_with_tf_uid_fix as l
         cross join __splink__compare_two_records_right_with_tf_uid_fix as r
         """
@@ -1226,8 +1430,6 @@ FROM fuzzy_tf_values;
         tf_params = {}
 
         # Get the total records in field from the global variable
-        from splink.internals.comparison_level import total_records_in_field
-
         tf_params["N"] = total_records_in_field.get(col_name, 226_657_846)
 
         # Find the comparison level that uses this column for TF adjustments
@@ -1261,3 +1463,79 @@ FROM fuzzy_tf_values;
 
         logger.info(f"tf_params for {col_name}: {tf_params}")
         return tf_params
+
+    def _generate_scalar_tf_bfs(self):
+        for comparison in self._linker._settings_obj.core_model_settings.comparisons:
+            for cl in comparison.comparison_levels:
+                if cl._has_tf_adjustments:
+                    self._generate_scalar_tf_bf(cl)
+
+    def _generate_scalar_tf_bf(self, cl: ComparisonLevel):
+        if cl._is_exact_match:
+            tf_col_is_array = cl._tf_col_is_array
+            if tf_col_is_array:
+                return
+
+            tf_adj_col = cl._tf_adjustment_input_column
+            col_name = tf_adj_col.unquote().name.replace(" ", "_")
+            product_l_r = f"(cv.{tf_adj_col.tf_name_l})"
+            tf_adjustment_exists = f"{product_l_r} is not null"
+            N = total_records_in_field[col_name]
+            # Using coalesce protects against one of the tf adjustments being null
+            # Which would happen if the user provided their own tf adjustment table
+            # That didn't contain some of the values in this data
+
+            # In this case rather than taking the greater of the two, we take
+            # whichever value exists
+
+            if cl._tf_minimum_u_value == 0.0:
+                divisor_sql = f"{product_l_r}"
+            else:
+                # This sql works correctly even when the tf_minimum_u_value is 0.0
+                # but is less efficient to execute, hence the above if statement
+                divisor_sql = f"""
+                (CASE
+                    WHEN {product_l_r} > cast({cl._tf_minimum_u_value} as float8)
+                        THEN {product_l_r}
+                    ELSE cast({cl._tf_minimum_u_value} as float8)
+                END)
+                """
+
+            if cl.tf_modifier_custom_sql:
+                multiplier_sql = f"({N} / ({divisor_sql} * ({cl.tf_modifier_custom_sql})))"
+            else:
+                multiplier_sql = f"({N} / {divisor_sql})"
+
+            sql = f"""
+            WHEN  {gamma_colname_value_is_this_level} then
+                (CASE WHEN {tf_adjustment_exists}
+                THEN {multiplier_sql}
+                ELSE 1.0
+                END)
+            """
+
+        else:
+            max_epsilon_value = cl.max_epsilon_value
+            similarity_value = cl.similarity_value
+            product_l_r = f"(cv.{tf_adj_col.tf_name_l} * cv.{tf_adj_col.tf_name_r})"
+
+            tf_adjustment_exists = f"{product_l_r} is not null"
+
+            tf_score_sql = f"(({similarity_value * N}/POW({product_l_r}, 0.5)))"
+
+            second_term = (1 - similarity_value) * max_epsilon_value * N**2
+            if second_term != 0:
+                tf_score_sql += f"+ ({second_term}/{product_l_r})"
+
+            if cl.tf_modifier_custom_sql:
+                multiplier_sql = f"(1/{cl.tf_modifier_custom_sql}) * {tf_score_sql}"
+            else:
+                multiplier_sql = f"{tf_score_sql}"
+
+            sql = f"""
+            WHEN  {gamma_colname_value_is_this_level} then
+                (CASE WHEN {tf_adjustment_exists}
+                THEN {multiplier_sql}
+                ELSE 1.0
+                END)
+            """

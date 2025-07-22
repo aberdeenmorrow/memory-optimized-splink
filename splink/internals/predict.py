@@ -150,6 +150,8 @@ def predict_from_agreement_pattern_counts_sqls(
         sql = f"CASE {sql} END as {cc._bf_column_name}"
         select_cols.append(cc._gamma_column_name)
         select_cols.append(sql)
+        select_cols.append("unique_id_l")
+        select_cols.append("unique_id_r")
     select_cols.append("agreement_pattern_count")
     select_cols_expr = ",".join(select_cols)
 

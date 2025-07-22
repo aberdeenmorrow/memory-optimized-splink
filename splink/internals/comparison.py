@@ -220,8 +220,10 @@ class Comparison:
 
     def _columns_to_select_for_comparison_vector_values(self, retain_matching_columns):
         input_cols = []
-        for cl in self.comparison_levels:
-            input_cols.extend(cl._input_columns_used_by_sql_condition)
+
+        if retain_matching_columns:
+            for cl in self.comparison_levels:
+                input_cols.extend(cl._input_columns_used_by_sql_condition)
 
         output_cols = []
         if retain_matching_columns:
@@ -234,8 +236,9 @@ class Comparison:
             if cl._has_tf_adjustments:
                 col = cl._tf_adjustment_input_column
                 if col is not None and col.is_array_column:
-                    continue
-                output_cols.extend(col.tf_name_l_r)
+                    output_cols.extend(col.names_l_r)
+                elif col is not None:
+                    output_cols.extend(col.tf_name_l_r)
                 if cl.tf_modifier_custom_sql:
                     output_cols.extend(
                         [

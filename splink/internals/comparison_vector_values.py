@@ -220,9 +220,11 @@ def compute_comparison_vector_values_from_id_pairs_memory_optimized(
     select_cols_expr = ", \n".join(columns_to_select_for_blocking)
     uid_l_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "l")
     uid_r_expr = _composite_unique_id_from_nodes_sql(unique_id_columns, "r")
+    if needs_matchkey_column:
+        select_cols_expr += ", b.match_key"
 
     blocked_candidates_sql = f"""
-                SELECT {select_cols_expr}, b.match_key
+                SELECT {select_cols_expr}
                 FROM {blocked_pairs_table_name} AS b
                 JOIN {df_concat_with_tf_table_name} AS l
                 ON {uid_l_expr} = b.join_key_l
@@ -297,6 +299,7 @@ def compute_comparison_vector_values_from_id_pairs_sqls(
     source_dataset_input_column: Optional[InputColumn],
     unique_id_input_column: InputColumn,
     include_clerical_match_score: bool = False,
+    include_matchkey_column: bool = True,
 ) -> list[dict[str, str]]:
     """Compute the comparison vectors from __splink__blocked_id_pairs, the
     materialised dataframe of blocked pairwise record comparisons.
@@ -321,8 +324,10 @@ def compute_comparison_vector_values_from_id_pairs_sqls(
     # using the __splink__blocked_id_pairs as an associated (junction) table
 
     # That is, it does the join, but doesn't compute the comparison vectors
+    if include_matchkey_column:
+        select_cols_expr += ", b.match_key"
     sql = f"""
-    select {select_cols_expr}, b.match_key
+    select {select_cols_expr}
     from {input_tablename_l} as l
     inner join __splink__blocked_id_pairs as b
     on {uid_l_expr} = b.join_key_l

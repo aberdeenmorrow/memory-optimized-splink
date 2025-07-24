@@ -7,9 +7,7 @@ import duckdb
 import pandas as pd
 
 from splink.internals.database_api import AcceptableInputTableType, DatabaseAPI
-from splink.internals.dialects import (
-    DuckDBDialect,
-)
+from splink.internals.dialects import DuckDBDialect
 
 from .dataframe import DuckDBDataFrame
 from .duckdb_helpers.duckdb_helpers import (
@@ -67,9 +65,7 @@ class DuckDBAPI(DatabaseAPI[duckdb.DuckDBPyRelation]):
             drop_sql = f"DROP VIEW IF EXISTS {name}"
             self._execute_sql_against_backend(drop_sql)
 
-    def _table_registration(
-        self, input: AcceptableInputTableType, table_name: str
-    ) -> None:
+    def _table_registration(self, input: AcceptableInputTableType, table_name: str) -> None:
         if isinstance(input, dict):
             input = pd.DataFrame(input)
         elif isinstance(input, list):
@@ -83,9 +79,7 @@ class DuckDBAPI(DatabaseAPI[duckdb.DuckDBPyRelation]):
 
         self._con.register(table_name, input)
 
-    def table_to_splink_dataframe(
-        self, templated_name: str, physical_name: str
-    ) -> DuckDBDataFrame:
+    def table_to_splink_dataframe(self, templated_name: str, physical_name: str) -> DuckDBDataFrame:
         return DuckDBDataFrame(templated_name, physical_name, self)
 
     def table_exists_in_database(self, table_name):
@@ -98,7 +92,9 @@ class DuckDBAPI(DatabaseAPI[duckdb.DuckDBPyRelation]):
             return False
         return True
 
-    def _execute_sql_against_backend(self, final_sql: str) -> duckdb.DuckDBPyRelation:
+    def _execute_sql_against_backend(self, final_sql: str, dont_log: bool = False) -> duckdb.DuckDBPyRelation:
+        if not dont_log:
+            logger.info(f"Executing SQL: {final_sql}")
         return self._con.sql(final_sql)
 
     @property

@@ -204,8 +204,8 @@ class BlockingRule:
 
         sql = f"""
             select {f"'{self.match_key}' as match_key," if include_match_key else ""}
-            {uid_l_expr} as join_key_l,
-            {uid_r_expr} as join_key_r
+            l.unique_id as unique_id_l,
+            r.unique_id as unique_id_r
             from {input_tablename_l} as l
             inner join {input_tablename_r} as r
             on
@@ -243,8 +243,8 @@ class BlockingRule:
         sql = f"""
             select
             {match_key_sql}
-            {uid_l_expr} as join_key_l,
-            {uid_r_expr} as join_key_r
+            l.unique_id as unique_id_l,
+            r.unique_id as unique_id_r
             from {input_tablename_l} as l
             join {input_tablename_r} as r
             on
@@ -536,8 +536,8 @@ class ExplodingBlockingRule(BlockingRule):
         sql = f"""
             select
                 {f"'{self.match_key}' as match_key," if include_matchkey_column else ""}
-                {unique_id_input_column.name_l} as join_key_l,
-                {unique_id_input_column.name_r} as join_key_r
+                {unique_id_input_column.name_l} as unique_id_l,
+                {unique_id_input_column.name_r} as unique_id_r
             from {exploded_id_pair_table.physical_name}
         """
         return sql
@@ -703,16 +703,8 @@ def _sql_gen_where_condition(
     exclude_sql: str | None = None,
     join_key_col_name: str | None = None,
 ) -> str:
-    id_expr_l = (
-        f"{join_key_col_name}_l"
-        if join_key_col_name
-        else _composite_unique_id_from_nodes_sql(unique_id_cols, "l")
-    )
-    id_expr_r = (
-        f"{join_key_col_name}_r"
-        if join_key_col_name
-        else _composite_unique_id_from_nodes_sql(unique_id_cols, "r")
-    )
+    id_expr_l = _composite_unique_id_from_nodes_sql(unique_id_cols, "l")
+    id_expr_r = _composite_unique_id_from_nodes_sql(unique_id_cols, "r")
 
     if link_type in ("two_dataset_link_only", "self_link"):
         where_condition = " where 1=1 "

@@ -380,8 +380,7 @@ class Settings:
 
         This column is only needed if multiple rules are specified.
         """
-
-        return len(self._blocking_rules_to_generate_predictions) > 1
+        return False
 
     @property
     def _columns_used_by_comparisons(self) -> List[str]:

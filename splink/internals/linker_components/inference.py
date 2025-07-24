@@ -1474,6 +1474,7 @@ CREATE TABLE exploded_terms_r AS (
         if cl._is_exact_match:
             tf_col_is_array = cl._tf_col_is_array
             if tf_col_is_array:
+                logger.info(f"Skipping {cl.comparison_vector_value} because it is an array")
                 return
 
             tf_adj_col = cl._tf_adjustment_input_column

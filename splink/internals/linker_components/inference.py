@@ -253,6 +253,9 @@ class LinkerInference:
             source_dataset_input_column=self._linker._settings_obj.column_info_settings.source_dataset_input_column,
             unique_id_input_column=self._linker._settings_obj.column_info_settings.unique_id_input_column,
             drop_exploded_tables=True,
+            df_tf_table_name=self._linker._intermediate_table_cache.get_with_logging(
+                "__splink__df_concat_with_tf"
+            ).physical_name,
         )
 
         # ------------------------------
@@ -267,7 +270,7 @@ class LinkerInference:
             source_dataset_input_column=self._linker._settings_obj.column_info_settings.source_dataset_input_column,
             unique_id_input_column=self._linker._settings_obj.column_info_settings.unique_id_input_column,
         )
-        logger.info(f"Blocking SQL: {sqls[0]['sql']}")
+        logger.info(f"Blocking SQL to create {sqls[0]['output_table_name']}: {sqls[0]['sql']}")
 
         self._linker._db_api._execute_sql_against_backend(
             f"""CREATE TABLE {sqls[0]['output_table_name']} AS 
@@ -325,7 +328,7 @@ class LinkerInference:
             self._linker._settings_obj._columns_to_select_for_comparison_vector_values,
             input_tablename_l=df_concat_with_tf.physical_name,
             input_tablename_r=df_concat_with_tf.physical_name,
-            source_dataset_input_column=self._linker._settings_obj.column_info_settings.source_dataset_input_column,
+            source_dataset_input_column=None,
             unique_id_input_column=self._linker._settings_obj.column_info_settings.unique_id_input_column,
         )
 

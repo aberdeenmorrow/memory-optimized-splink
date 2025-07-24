@@ -102,6 +102,7 @@ class LinkerTraining:
             unique_id_input_column=self._linker._settings_obj.column_info_settings.unique_id_input_column,
             source_dataset_input_column=self._linker._settings_obj.column_info_settings.source_dataset_input_column,
             drop_materialised_id_pairs_dataframes=drop_materialised_id_pairs_dataframes,
+            linker=linker,
         )
 
         records = pd_df.to_dict(orient="records")

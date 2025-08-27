@@ -299,7 +299,7 @@ def compute_comparison_vector_values_from_id_pairs_sqls(
     source_dataset_input_column: Optional[InputColumn],
     unique_id_input_column: InputColumn,
     include_clerical_match_score: bool = False,
-    include_matchkey_column: bool = True,
+    include_match_key: bool = True,
 ) -> list[dict[str, str]]:
     """Compute the comparison vectors from __splink__blocked_id_pairs, the
     materialised dataframe of blocked pairwise record comparisons.
@@ -324,7 +324,7 @@ def compute_comparison_vector_values_from_id_pairs_sqls(
     # using the __splink__blocked_id_pairs as an associated (junction) table
 
     # That is, it does the join, but doesn't compute the comparison vectors
-    if include_matchkey_column:
+    if include_match_key:
         select_cols_expr += ", b.match_key"
     sql = f"""
     select {select_cols_expr}

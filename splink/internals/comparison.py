@@ -90,9 +90,10 @@ class Comparison:
 
         default_m_values = _default_m_values(num_levels)
         default_u_values = _default_u_values(num_levels)
+        null_levels = [cl for cl in self.comparison_levels if cl.is_null_level]
         for level in self.comparison_levels:
             if level.is_null_level:
-                level._comparison_vector_value = -1
+                level._comparison_vector_value = -(1 - null_levels.index(level))
                 level._max_level = False
             else:
                 level._comparison_vector_value = counter

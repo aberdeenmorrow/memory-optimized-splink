@@ -62,7 +62,7 @@ def term_frequencies_for_single_column_sqls(
         else:
             explode_sql = f"""
                 SELECT
-                    LOWER(CAST(val.unnest AS VARCHAR)) AS {col_name_unquoted}
+                    LOWER(CAST(tf_{col_name_unquoted}.unnest AS VARCHAR)) AS {col_name_unquoted}
                 FROM {table_name} AS c
                 CROSS JOIN UNNEST(c.{col_name}) AS tf_{col_name_unquoted}
                 WHERE c.{col_name} IS NOT NULL AND tf_{col_name_unquoted} IS NOT NULL
@@ -229,6 +229,8 @@ def compute_all_term_frequencies_sqls(linker: Linker, pipeline: CTEPipeline) -> 
 
     sqls = []
     cache = linker._intermediate_table_cache
+
+    logger.info(f"tf_cols: {tf_cols}")
 
     for tf_col in tf_cols:
         if tf_col.is_array_column:

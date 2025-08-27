@@ -29,9 +29,7 @@ for dialect in dialects:
     dialect_comparison_templates[dialect] = []
     dialect_level_compositions[dialect] = []
     for class_name, cls in inspect.getmembers(
-        importlib.import_module(
-            ".comparison_level_library", package=f"splink.{dialect}"
-        ),
+        importlib.import_module(".comparison_level_library", package=f"splink.{dialect}"),
         inspect.isclass,
     ):
         if issubclass(cls, ComparisonLevel) and issubclass(cls, DialectBase):
@@ -43,17 +41,13 @@ for dialect in dialects:
         if issubclass(cls, Comparison) and issubclass(cls, DialectBase):
             dialect_comparisons[dialect].append(class_name)
     for class_name, cls in inspect.getmembers(
-        importlib.import_module(
-            ".comparison_template_library", package=f"splink.{dialect}"
-        ),
+        importlib.import_module(".comparison_template_library", package=f"splink.{dialect}"),
         inspect.isclass,
     ):
         if issubclass(cls, Comparison) and issubclass(cls, DialectBase):
             dialect_comparison_templates[dialect].append(class_name)
     for function in inspect.getmembers(
-        importlib.import_module(
-            ".comparison_level_library", package=f"splink.{dialect}"
-        ),
+        importlib.import_module(".comparison_level_library", package=f"splink.{dialect}"),
         inspect.isfunction,
     ):
         function_name = function[0]
@@ -62,12 +56,8 @@ for dialect in dialects:
 
 all_sorted_levels = sorted({y for x in dialect_levels.values() for y in x})
 all_sorted_comparisons = sorted({y for x in dialect_comparisons.values() for y in x})
-all_sorted_comparison_templates = sorted(
-    {y for x in dialect_comparison_templates.values() for y in x}
-)
-all_sorted_level_compositions = sorted(
-    {y for x in dialect_level_compositions.values() for y in x}
-)
+all_sorted_comparison_templates = sorted({y for x in dialect_comparison_templates.values() for y in x})
+all_sorted_level_compositions = sorted({y for x in dialect_level_compositions.values() for y in x})
 
 
 def base_function_string(input_string):
@@ -98,17 +88,13 @@ comparison_dialects = {
 comparison_template_dialects = {
     f"[{comp_temp}](#splink.comparison_template_library."
     + f"{base_function_string(comp_temp)})": [
-        dialect
-        for dialect in dialects
-        if comp_temp in dialect_comparison_templates[dialect]
+        dialect for dialect in dialects if comp_temp in dialect_comparison_templates[dialect]
     ]
     for comp_temp in all_sorted_comparison_templates
 }
 level_composition_dialects = {
     f"[{lev_comp}](#splink.comparison_level_composition.{lev_comp})": [
-        dialect
-        for dialect in dialects
-        if lev_comp in dialect_level_compositions[dialect]
+        dialect for dialect in dialects if lev_comp in dialect_level_compositions[dialect]
     ]
     for lev_comp in all_sorted_level_compositions
 }
@@ -125,9 +111,7 @@ def make_md_table(opts):
 
     # then rows for each level indicating which dialects support it
     for level_name, level_dialects in opts.items():
-        level_yes_no_dialect_string = (
-            yes_string if d in level_dialects else no_string for d in dialects
-        )
+        level_yes_no_dialect_string = (yes_string if d in level_dialects else no_string for d in dialects)
         table += f"|{level_name}|"
         table += f"{'|'.join(level_yes_no_dialect_string)}|\n"
     return table

@@ -118,7 +118,10 @@ def compute_df_concat_with_tf(linker: Linker, pipeline: CTEPipeline) -> SplinkDa
         source_dataset_input_column=sds_ic,
     )
     pipeline.enqueue_sql(sql, "__splink__df_concat")
+    df_concat = db_api.sql_pipeline_to_splink_dataframe(pipeline)
+    cache["__splink__df_concat"] = df_concat
 
+    pipeline = CTEPipeline([df_concat])
     sqls = compute_all_term_frequencies_sqls(linker, pipeline)
     pipeline.enqueue_list_of_sqls(sqls)
 

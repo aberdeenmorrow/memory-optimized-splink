@@ -249,13 +249,10 @@ class LinkerInference:
             link_type=link_type,
             blocking_rules=self._linker._settings_obj._blocking_rules_to_generate_predictions,
             db_api=self._linker._db_api,
-            splink_df_dict=self._linker._input_tables_dict,
             source_dataset_input_column=self._linker._settings_obj.column_info_settings.source_dataset_input_column,
             unique_id_input_column=self._linker._settings_obj.column_info_settings.unique_id_input_column,
             drop_exploded_tables=True,
-            df_tf_table_name=self._linker._intermediate_table_cache.get_with_logging(
-                "__splink__df_concat_with_tf"
-            ).physical_name,
+            df_tf_concat=df_concat_with_tf,
         )
 
         # ------------------------------
